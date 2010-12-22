@@ -5475,6 +5475,7 @@ int apply_filter_to_req_headers(struct session *t, struct buffer *req, struct hd
 				txn->hdr_idx.used--;
 				cur_hdr->len = 0;
 				cur_end = NULL; /* null-term has been rewritten */
+				cur_idx = old_idx;
 				break;
 
 			}
@@ -6185,6 +6186,11 @@ void manage_client_side_cookies(struct session *t, struct buffer *req)
 
 				if (del_from != NULL) {
 					int delta = del_hdr_value(req, &del_from, prev);
+					if (att_beg >= del_from)
+						att_beg += delta;
+					if (att_end >= del_from)
+						att_end += delta;
+					val_beg  += delta;
 					val_end  += delta;
 					next     += delta;
 					hdr_end  += delta;
@@ -6242,6 +6248,7 @@ void manage_client_side_cookies(struct session *t, struct buffer *req)
 				txn->hdr_idx.v[old_idx].next = cur_hdr->next;
 				txn->hdr_idx.used--;
 				cur_hdr->len = 0;
+				cur_idx = old_idx;
 			}
 			hdr_next += delta;
 			http_msg_move_end(&txn->req, delta);
@@ -6334,6 +6341,7 @@ int apply_filter_to_resp_headers(struct session *t, struct buffer *rtr, struct h
 				txn->hdr_idx.used--;
 				cur_hdr->len = 0;
 				cur_end = NULL; /* null-term has been rewritten */
+				cur_idx = old_idx;
 				break;
 
 			}
@@ -6688,11 +6696,12 @@ void manage_server_side_cookies(struct session *t, struct buffer *res)
 				if ((txn->srv_cookie = pool_alloc2(pool2_capture)) == NULL) {
 					Alert("HTTP logging : out of memory.\n");
 				}
-
-				if (log_len > t->fe->capture_len)
-					log_len = t->fe->capture_len;
-				memcpy(txn->srv_cookie, att_beg, log_len);
-				txn->srv_cookie[log_len] = 0;
+				else {
+					if (log_len > t->fe->capture_len)
+						log_len = t->fe->capture_len;
+					memcpy(txn->srv_cookie, att_beg, log_len);
+					txn->srv_cookie[log_len] = 0;
+				}
 			}
 
 			/* now check if we need to process it for persistence */
@@ -6722,6 +6731,7 @@ void manage_server_side_cookies(struct session *t, struct buffer *res)
 						txn->hdr_idx.v[old_idx].next = cur_hdr->next;
 						txn->hdr_idx.used--;
 						cur_hdr->len = 0;
+						cur_idx = old_idx;
 						hdr_next += delta;
 						http_msg_move_end(&txn->rsp, delta);
 						/* note: while both invalid now, <next> and <hdr_end>
@@ -6821,6 +6831,8 @@ void manage_server_side_cookies(struct session *t, struct buffer *res)
 				send_log(t->be, LOG_ALERT, "Not enough Memory process_srv():asession:calloc().\n");
 				return;
 			}
+			asession->serverid = NULL; /* to avoid a double free in case of allocation error */
+
 			if ((asession->sessid = pool_alloc2(apools.sessid)) == NULL) {
 				Alert("Not enough Memory process_srv():asession->sessid:malloc().\n");
 				send_log(t->be, LOG_ALERT, "Not enough Memory process_srv():asession->sessid:malloc().\n");
@@ -6832,7 +6844,7 @@ void manage_server_side_cookies(struct session *t, struct buffer *res)
 
 			server_id_len = strlen(t->srv->id) + 1;
 			if ((asession->serverid = pool_alloc2(apools.serverid)) == NULL) {
-				Alert("Not enough Memory process_srv():asession->sessid:malloc().\n");
+				Alert("Not enough Memory process_srv():asession->serverid:malloc().\n");
 				send_log(t->be, LOG_ALERT, "Not enough Memory process_srv():asession->sessid:malloc().\n");
 				t->be->htbl_proxy.destroy(asession);
 				return;
