@@ -2081,13 +2081,13 @@ int http_parse_chunk_size(struct buffer *buf, struct http_msg *msg)
 		if (++ptr >= end)
 			ptr = buf->data;
 		if (chunk & 0xF000000) /* overflow will occur */
-			return -1;
+			goto error;
 		chunk = (chunk << 4) + c;
 	}
 
 	/* empty size not allowed */
 	if (ptr == buf->lr)
-		return -1;
+		goto error;
 
 	while (http_is_spht[(unsigned char)*ptr]) {
 		if (++ptr >= end)
@@ -2110,7 +2110,7 @@ int http_parse_chunk_size(struct buffer *buf, struct http_msg *msg)
 			}
 
 			if (*ptr != '\n')
-				return -1;
+				goto error;
 			if (++ptr >= end)
 				ptr = buf->data;
 			/* done */
@@ -2133,7 +2133,7 @@ int http_parse_chunk_size(struct buffer *buf, struct http_msg *msg)
 			continue;
 		}
 		else
-			return -1;
+			goto error;
 	}
 
 	/* OK we found our CRLF and now <ptr> points to the next byte,
@@ -2145,6 +2145,9 @@ int http_parse_chunk_size(struct buffer *buf, struct http_msg *msg)
 	msg->hdr_content_len = chunk;
 	msg->msg_state = chunk ? HTTP_MSG_DATA : HTTP_MSG_TRAILERS;
 	return 1;
+ error:
+	msg->err_pos = ptr - buf->data;
+	return -1;
 }
 
 /* This function skips trailers in the buffer <buf> associated with HTTP
@@ -2183,8 +2186,10 @@ int http_forward_trailers(struct buffer *buf, struct http_msg *msg)
 			}
 
 			if (*ptr == '\r') {
-				if (p1)
+				if (p1) {
+					msg->err_pos = ptr - buf->data;
 					return -1;
+				}
 				p1 = ptr;
 			}
 
@@ -2251,8 +2256,10 @@ int http_skip_chunk_crlf(struct buffer *buf, struct http_msg *msg)
 	if (bytes > buf->l - buf->send_max)
 		return 0;
 
-	if (*ptr != '\n')
+	if (*ptr != '\n') {
+		msg->err_pos = ptr - buf->data;
 		return -1;
+	}
 
 	ptr++;
 	if (ptr >= buf->data + buf->size)
@@ -2475,7 +2482,8 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 
 			/* we cannot return any message on error */
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+				http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
+
 			msg->msg_state = HTTP_MSG_ERROR;
 			req->analysers = 0;
 
@@ -2499,7 +2507,7 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 
 			/* read timeout : give up with an error message. */
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+				http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
 			txn->status = 408;
 			stream_int_retnclose(req->prod, error_message(s, HTTP_ERR_408));
 			msg->msg_state = HTTP_MSG_ERROR;
@@ -2524,7 +2532,7 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 				goto failed_keep_alive;
 
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+				http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
 			txn->status = 400;
 			stream_int_retnclose(req->prod, error_message(s, HTTP_ERR_400));
 			msg->msg_state = HTTP_MSG_ERROR;
@@ -2603,7 +2611,7 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 	 * to block on that, so we have to capture it now.
 	 */
 	if (unlikely(msg->err_pos >= 0))
-		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
 
 	/*
 	 * 1: identify the method
@@ -2799,7 +2807,7 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 		/* we detected a parsing error. We want to archive this request
 		 * in the dedicated proxy area for later troubleshooting.
 		 */
-		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
 	}
 
 	txn->req.msg_state = HTTP_MSG_ERROR;
@@ -3062,7 +3070,8 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
 	     (s->be->options & (PR_O_KEEPALIVE|PR_O_SERVER_CLO|PR_O_HTTP_CLOSE|PR_O_FORCE_CLO)))) {
 		int tmp = TX_CON_WANT_TUN;
 
-		if ((s->fe->options|s->be->options) & PR_O_KEEPALIVE)
+		if ((s->fe->options|s->be->options) & PR_O_KEEPALIVE ||
+		    ((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA))
 			tmp = TX_CON_WANT_KAL;
 		if ((s->fe->options|s->be->options) & PR_O_SERVER_CLO)
 			tmp = TX_CON_WANT_SCL;
@@ -3089,8 +3098,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
 		     (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL) &&
 		    ((txn->flags & TX_HDR_CONN_CLO) ||                         /* "connection: close" */
 		     (txn->flags & (TX_REQ_VER_11|TX_HDR_CONN_KAL)) == 0 ||    /* no "connection: k-a" in 1.0 */
-		     (((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE) &&   /* httpclose without pretend-ka... */
-		      1/*!((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)*/) || /* ... +any = forceclose */
+		     ((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE) ||    /* httpclose+any = forceclose */
 		     !(txn->flags & TX_REQ_XFER_LEN) ||                        /* no length known => close */
 		     s->fe->state == PR_STSTOPPED))                            /* frontend is stopping */
 		    txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
@@ -3344,7 +3352,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
 		/* we detected a parsing error. We want to archive this request
 		 * in the dedicated proxy area for later troubleshooting.
 		 */
-		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
 	}
 
 	txn->req.msg_state = HTTP_MSG_ERROR;
@@ -3541,8 +3549,7 @@ int http_process_request(struct session *s, struct buffer *req, int an_bit)
 
 	/* 11: add "Connection: close" or "Connection: keep-alive" if needed and not yet set. */
 	if (((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) ||
-	    ((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE) ||
-	    ((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)) {
+	    ((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE)) {
 		unsigned int want_flags = 0;
 
 		if (txn->flags & TX_REQ_VER_11) {
@@ -3594,7 +3601,7 @@ int http_process_request(struct session *s, struct buffer *req, int an_bit)
 		/* we detected a parsing error. We want to archive this request
 		 * in the dedicated proxy area for later troubleshooting.
 		 */
-		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, s->fe);
+		http_capture_bad_message(&s->fe->invalid_req, s, req, msg, msg->msg_state, s->fe);
 	}
 
 	txn->req.msg_state = HTTP_MSG_ERROR;
@@ -4319,9 +4326,15 @@ int http_request_forward_body(struct session *s, struct buffer *req, int an_bit)
 
 			if (!ret)
 				goto missing_data;
-			else if (ret < 0)
+			else if (ret < 0) {
+				if (msg->err_pos >= 0)
+					http_capture_bad_message(&s->fe->invalid_req, s, req, msg, HTTP_MSG_CHUNK_SIZE, s->be);
 				goto return_bad_req;
+			}
 			/* otherwise we're in HTTP_MSG_DATA or HTTP_MSG_TRAILERS state */
+			/* Don't set a PUSH at the end of that chunk if it's not the last one */
+			if (msg->msg_state == HTTP_MSG_DATA)
+				req->flags |= BF_EXPECT_MORE;
 		}
 		else if (msg->msg_state == HTTP_MSG_DATA_CRLF) {
 			/* we want the CRLF after the data */
@@ -4335,8 +4348,11 @@ int http_request_forward_body(struct session *s, struct buffer *req, int an_bit)
 
 			if (ret == 0)
 				goto missing_data;
-			else if (ret < 0)
+			else if (ret < 0) {
+				if (msg->err_pos >= 0)
+					http_capture_bad_message(&s->fe->invalid_req, s, req, msg, HTTP_MSG_DATA_CRLF, s->be);
 				goto return_bad_req;
+			}
 			/* we're in MSG_CHUNK_SIZE now */
 		}
 		else if (msg->msg_state == HTTP_MSG_TRAILERS) {
@@ -4344,18 +4360,32 @@ int http_request_forward_body(struct session *s, struct buffer *req, int an_bit)
 
 			if (ret == 0)
 				goto missing_data;
-			else if (ret < 0)
+			else if (ret < 0) {
+				if (msg->err_pos >= 0)
+					http_capture_bad_message(&s->fe->invalid_req, s, req, msg, HTTP_MSG_TRAILERS, s->be);
 				goto return_bad_req;
+			}
 			/* we're in HTTP_MSG_DONE now */
 		}
 		else {
+			int old_state = msg->msg_state;
+
 			/* other states, DONE...TUNNEL */
 			if (http_resync_states(s)) {
 				/* some state changes occurred, maybe the analyser
 				 * was disabled too.
 				 */
-				if (unlikely(msg->msg_state == HTTP_MSG_ERROR))
+				if (unlikely(msg->msg_state == HTTP_MSG_ERROR)) {
+					if (req->flags & BF_SHUTW) {
+						/* request errors are most likely due to
+						 * the server aborting the transfer.
+						 */
+						goto aborted_xfer;
+					}
+					if (msg->err_pos >= 0)
+						http_capture_bad_message(&s->fe->invalid_req, s, req, msg, old_state, s->be);
 					goto return_bad_req;
+				}
 				return 1;
 			}
 
@@ -4387,38 +4417,81 @@ int http_request_forward_body(struct session *s, struct buffer *req, int an_bit)
 	if (req->flags & BF_SHUTR) {
 		if (!(s->flags & SN_ERR_MASK))
 			s->flags |= SN_ERR_CLICL;
-		if (!(s->flags & SN_FINST_MASK))
-			s->flags |= SN_FINST_D;
-		goto return_bad_req;
+		if (!(s->flags & SN_FINST_MASK)) {
+			if (txn->rsp.msg_state < HTTP_MSG_ERROR)
+				s->flags |= SN_FINST_H;
+			else
+				s->flags |= SN_FINST_D;
+		}
+
+		s->fe->counters.cli_aborts++;
+		if (s->fe != s->be)
+			s->be->counters.cli_aborts++;
+		if (s->srv)
+			s->srv->counters.cli_aborts++;
+
+		goto return_bad_req_stats_ok;
 	}
 
 	/* waiting for the last bits to leave the buffer */
-	if (req->flags & BF_SHUTW) {
-		if (!(s->flags & SN_ERR_MASK))
-			s->flags |= SN_ERR_SRVCL;
-		if (!(s->flags & SN_FINST_MASK))
-			s->flags |= SN_FINST_D;
-		goto return_bad_req;
-	}
+	if (req->flags & BF_SHUTW)
+		goto aborted_xfer;
 
 	http_silent_debug(__LINE__, s);
 	return 0;
 
  return_bad_req: /* let's centralize all bad requests */
-	txn->req.msg_state = HTTP_MSG_ERROR;
-	txn->status = 400;
-	/* Note: we don't send any error if some data were already sent */
-	stream_int_retnclose(req->prod, (txn->rsp.msg_state < HTTP_MSG_BODY) ? error_message(s, HTTP_ERR_400) : NULL);
-	req->analysers = 0;
 	s->fe->counters.failed_req++;
 	if (s->listener->counters)
 		s->listener->counters->failed_req++;
+ return_bad_req_stats_ok:
+	txn->req.msg_state = HTTP_MSG_ERROR;
+	if (txn->status) {
+		/* Note: we don't send any error if some data were already sent */
+		stream_int_retnclose(req->prod, NULL);
+	} else {
+		txn->status = 400;
+		stream_int_retnclose(req->prod, error_message(s, HTTP_ERR_400));
+	}
+	req->analysers = 0;
+	s->rep->analysers = 0; /* we're in data phase, we want to abort both directions */
 
 	if (!(s->flags & SN_ERR_MASK))
 		s->flags |= SN_ERR_PRXCOND;
-	if (!(s->flags & SN_FINST_MASK))
-		s->flags |= SN_FINST_R;
-	http_silent_debug(__LINE__, s);
+	if (!(s->flags & SN_FINST_MASK)) {
+		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
+			s->flags |= SN_FINST_H;
+		else
+			s->flags |= SN_FINST_D;
+	}
+	return 0;
+
+ aborted_xfer:
+	txn->req.msg_state = HTTP_MSG_ERROR;
+	if (txn->status) {
+		/* Note: we don't send any error if some data were already sent */
+		stream_int_retnclose(req->prod, NULL);
+	} else {
+		txn->status = 502;
+		stream_int_retnclose(req->prod, error_message(s, HTTP_ERR_502));
+	}
+	req->analysers = 0;
+	s->rep->analysers = 0; /* we're in data phase, we want to abort both directions */
+
+	s->fe->counters.srv_aborts++;
+	if (s->fe != s->be)
+		s->be->counters.srv_aborts++;
+	if (s->srv)
+		s->srv->counters.srv_aborts++;
+
+	if (!(s->flags & SN_ERR_MASK))
+		s->flags |= SN_ERR_SRVCL;
+	if (!(s->flags & SN_FINST_MASK)) {
+		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
+			s->flags |= SN_FINST_H;
+		else
+			s->flags |= SN_FINST_D;
+	}
 	return 0;
 }
 
@@ -4532,7 +4605,7 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 			 */
 		hdr_response_bad:
 			if (msg->msg_state == HTTP_MSG_ERROR || msg->err_pos >= 0)
-				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, s->fe);
+				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 			s->be->counters.failed_resp++;
 			if (s->srv) {
@@ -4563,7 +4636,7 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 		/* read error */
 		else if (rep->flags & BF_READ_ERROR) {
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, s->fe);
+				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 			s->be->counters.failed_resp++;
 			if (s->srv) {
@@ -4588,7 +4661,7 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 		/* read timeout : return a 504 to the client. */
 		else if (rep->flags & BF_READ_TIMEOUT) {
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, s->fe);
+				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 			s->be->counters.failed_resp++;
 			if (s->srv) {
@@ -4613,7 +4686,7 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 		/* close from server */
 		else if (rep->flags & BF_SHUTR) {
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, s->fe);
+				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 			s->be->counters.failed_resp++;
 			if (s->srv) {
@@ -4638,7 +4711,7 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 		/* write error to client (we don't send any message then) */
 		else if (rep->flags & BF_WRITE_ERROR) {
 			if (msg->err_pos >= 0)
-				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, s->fe);
+				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 			s->be->counters.failed_resp++;
 			rep->analysers = 0;
@@ -4663,7 +4736,7 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 	 */
 
 	if (unlikely(msg->err_pos >= 0))
-		http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, s->fe);
+		http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 	/*
 	 * 1: get the status code
@@ -5274,9 +5347,15 @@ int http_response_forward_body(struct session *s, struct buffer *res, int an_bit
 
 			if (!ret)
 				goto missing_data;
-			else if (ret < 0)
+			else if (ret < 0) {
+				if (msg->err_pos >= 0)
+					http_capture_bad_message(&s->be->invalid_rep, s, res, msg, HTTP_MSG_CHUNK_SIZE, s->fe);
 				goto return_bad_res;
+			}
 			/* otherwise we're in HTTP_MSG_DATA or HTTP_MSG_TRAILERS state */
+			/* Don't set a PUSH at the end of that chunk if it's not the last one */
+			if (msg->msg_state == HTTP_MSG_DATA)
+				res->flags |= BF_EXPECT_MORE;
 		}
 		else if (msg->msg_state == HTTP_MSG_DATA_CRLF) {
 			/* we want the CRLF after the data */
@@ -5290,8 +5369,11 @@ int http_response_forward_body(struct session *s, struct buffer *res, int an_bit
 
 			if (!ret)
 				goto missing_data;
-			else if (ret < 0)
+			else if (ret < 0) {
+				if (msg->err_pos >= 0)
+					http_capture_bad_message(&s->be->invalid_rep, s, res, msg, HTTP_MSG_DATA_CRLF, s->fe);
 				goto return_bad_res;
+			}
 			/* we're in MSG_CHUNK_SIZE now */
 		}
 		else if (msg->msg_state == HTTP_MSG_TRAILERS) {
@@ -5299,19 +5381,33 @@ int http_response_forward_body(struct session *s, struct buffer *res, int an_bit
 
 			if (ret == 0)
 				goto missing_data;
-			else if (ret < 0)
+			else if (ret < 0) {
+				if (msg->err_pos >= 0)
+					http_capture_bad_message(&s->be->invalid_rep, s, res, msg, HTTP_MSG_TRAILERS, s->fe);
 				goto return_bad_res;
+			}
 			/* we're in HTTP_MSG_DONE now */
 		}
 		else {
+			int old_state = msg->msg_state;
+
 			/* other states, DONE...TUNNEL */
 			if (http_resync_states(s)) {
 				http_silent_debug(__LINE__, s);
 				/* some state changes occurred, maybe the analyser
 				 * was disabled too.
 				 */
-				if (unlikely(msg->msg_state == HTTP_MSG_ERROR))
+				if (unlikely(msg->msg_state == HTTP_MSG_ERROR)) {
+					if (res->flags & BF_SHUTW) {
+						/* response errors are most likely due to
+						 * the client aborting the transfer.
+						 */
+						goto aborted_xfer;
+					}
+					if (msg->err_pos >= 0)
+						http_capture_bad_message(&s->be->invalid_rep, s, res, msg, old_state, s->fe);
 					goto return_bad_res;
+				}
 				return 1;
 			}
 			return 0;
@@ -5326,8 +5422,11 @@ int http_response_forward_body(struct session *s, struct buffer *res, int an_bit
 		s->be->counters.srv_aborts++;
 		if (s->srv)
 			s->srv->counters.srv_aborts++;
-		goto return_bad_res;
+		goto return_bad_res_stats_ok;
 	}
+
+	if (res->flags & BF_SHUTW)
+		goto aborted_xfer;
 
 	/* we need to obey the req analyser, so if it leaves, we must too */
 	if (!s->req->analysers)
@@ -5345,21 +5444,42 @@ int http_response_forward_body(struct session *s, struct buffer *res, int an_bit
 	return 0;
 
  return_bad_res: /* let's centralize all bad responses */
+	s->be->counters.failed_resp++;
+	if (s->srv)
+		s->srv->counters.failed_resp++;
+
+ return_bad_res_stats_ok:
 	txn->rsp.msg_state = HTTP_MSG_ERROR;
 	/* don't send any error message as we're in the body */
 	stream_int_retnclose(res->cons, NULL);
 	res->analysers = 0;
-	s->be->counters.failed_resp++;
-	if (s->srv) {
-		s->srv->counters.failed_resp++;
+	s->req->analysers = 0; /* we're in data phase, we want to abort both directions */
+	if (s->srv)
 		health_adjust(s->srv, HANA_STATUS_HTTP_HDRRSP);
-	}
 
 	if (!(s->flags & SN_ERR_MASK))
 		s->flags |= SN_ERR_PRXCOND;
 	if (!(s->flags & SN_FINST_MASK))
 		s->flags |= SN_FINST_D;
-	http_silent_debug(__LINE__, s);
+	return 0;
+
+ aborted_xfer:
+	txn->rsp.msg_state = HTTP_MSG_ERROR;
+	/* don't send any error message as we're in the body */
+	stream_int_retnclose(res->cons, NULL);
+	res->analysers = 0;
+	s->req->analysers = 0; /* we're in data phase, we want to abort both directions */
+
+	s->fe->counters.cli_aborts++;
+	if (s->fe != s->be)
+		s->be->counters.cli_aborts++;
+	if (s->srv)
+		s->srv->counters.cli_aborts++;
+
+	if (!(s->flags & SN_ERR_MASK))
+		s->flags |= SN_ERR_CLICL;
+	if (!(s->flags & SN_FINST_MASK))
+		s->flags |= SN_FINST_D;
 	return 0;
 }
 
@@ -7115,19 +7235,35 @@ int stats_check_uri(struct session *t, struct proxy *backend)
  */
 void http_capture_bad_message(struct error_snapshot *es, struct session *s,
                               struct buffer *buf, struct http_msg *msg,
-			      struct proxy *other_end)
+			      int state, struct proxy *other_end)
 {
-	es->len = buf->r - (buf->data + msg->som);
-	memcpy(es->buf, buf->data + msg->som, MIN(es->len, sizeof(es->buf)));
+	if (buf->r <= (buf->data + msg->som)) { /* message wraps */
+		int len1 = buf->size - msg->som;
+		es->len = buf->r - (buf->data + msg->som) + buf->size;
+		memcpy(es->buf, buf->data + msg->som, MIN(len1, sizeof(es->buf)));
+		if (es->len > len1 && len1 < sizeof(es->buf))
+			memcpy(es->buf, buf->data, MIN(es->len, sizeof(es->buf)) - len1);
+	}
+	else {
+		es->len = buf->r - (buf->data + msg->som);
+		memcpy(es->buf, buf->data + msg->som, MIN(es->len, sizeof(es->buf)));
+	}
+
 	if (msg->err_pos >= 0)
 		es->pos  = msg->err_pos - msg->som;
-	else
+	else if (buf->lr >= (buf->data + msg->som))
 		es->pos  = buf->lr - (buf->data + msg->som);
+	else
+		es->pos  = buf->lr - (buf->data + msg->som) + buf->size;
+
 	es->when = date; // user-visible date
 	es->sid  = s->uniq_id;
 	es->srv  = s->srv;
 	es->oe   = other_end;
 	es->src  = s->cli_addr;
+	es->state = state;
+	es->flags = buf->flags;
+	es->ev_id = error_snapshot_id++;
 }
 
 /* return the IP address pointed to by occurrence <occ> of header <hname> in

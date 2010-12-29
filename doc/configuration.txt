@@ -432,6 +432,7 @@ The following keywords are supported in the "global" section :
    - gid
    - group
    - log
+   - log-send-hostname
    - nbproc
    - pidfile
    - uid
@@ -522,6 +523,13 @@ log <address> <facility> [max level [min level]]
   Eight levels are known :
 
 	  emerg  alert  crit   err    warning notice info  debug
+
+log-send-hostname [<string>]
+  Sets the hostname field in the syslog header. If optional "string" parameter
+  is set the header is set to the string contents, otherwise uses the hostname
+  of the system. Generally used if one is not relaying logs through an
+  intermediate syslog server or for simply customizing the hostname printed in
+  the logs.
 
 nbproc <number>
   Creates <number> processes when going daemon. This requires the "daemon"
@@ -1070,11 +1078,15 @@ appsession <cookie> len <length> timeout <holdtime>
 
   The definition of an application cookie is limited to one per backend.
 
+  Note : Consider not using this feature in multi-process mode (nbproc > 1)
+         unless you know what you do : memory is not shared between the
+         processes, which can result in random behaviours.
+
   Example :
         appsession JSESSIONID len 52 timeout 3h
 
-  See also : "cookie", "capture cookie", "balance", "stick", "stick-table"
-             and "ignore-persist"
+  See also : "cookie", "capture cookie", "balance", "stick", "stick-table",
+             "ignore-persist", "nbproc" and "bind-process".
 
 
 backlog <conns>
@@ -3190,7 +3202,7 @@ no option http_proxy
   addresses are passed. Since this option's usage perimeter is rather limited,
   it will probably be used only by experts who know they need exactly it. Last,
   if the clients are susceptible of sending keep-alive requests, it will be
-  needed to add "option http_close" to ensure that all requests will correctly
+  needed to add "option httpclose" to ensure that all requests will correctly
   be analyzed.
 
   If this option has been enabled in a "defaults" section, it can be disabled
@@ -3203,30 +3215,6 @@ no option http_proxy
         option http_proxy
 
   See also : "option httpclose"
-
-
-option ignore-persist { if | unless } <condition>
-  Declare a condition to ignore persistence
-  May be used in sections:    defaults | frontend | listen | backend
-                                  no   |    yes   |   yes  |   yes
-
-  By default, when cookie persistence is enabled, every requests containing
-  the cookie are unconditionally persistent (assuming the target server is up
-  and running).
-
-  The "ignore-persist" statement allows one to declare various ACL-based
-  conditions which, when met, will cause a request to ignore persistence.
-  This is sometimes useful to load balance requests for static files, which
-  oftenly don't require persistence. This can also be used to fully disable
-  persistence for a specific User-Agent (for example, some web crawler bots).
-
-  Combined with "appsession", it can also help reduce HAProxy memory usage, as
-  the appsession table won't grow if persistence is ignored.
-
-  The persistence is ignored when an "if" condition is met, or unless an
-  "unless" condition is met.
-
-  See also : "option force-persist", "cookie", and section 7 about ACL usage.
 
 
 option independant-streams
@@ -4696,6 +4684,10 @@ stats admin { if | unless } <cond>
   The admin level allows to enable/disable servers from the web interface. By
   default, statistics page is read-only for security reasons.
 
+  Note : Consider not using this feature in multi-process mode (nbproc > 1)
+         unless you know what you do : memory is not shared between the
+         processes, which can result in random behaviours.
+
   Currently, there are 2 known limitations :
 
     - The POST data are limited to one packet, which means that if the list of
@@ -4732,8 +4724,9 @@ stats admin { if | unless } <cond>
         stats http-request auth unless AUTH
         stats admin if AUTH_ADMIN
 
-  See also : "stats enable", "stats auth", "stats http-request", section 3.4
-             about userlists and section 7 about ACL usage.
+  See also : "stats enable", "stats auth", "stats http-request", "nbproc",
+             "bind-process", section 3.4 about userlists and section 7 about
+             ACL usage.
 
 
 stats auth <user>:<passwd>
@@ -5174,6 +5167,10 @@ stick match <pattern> [table <table>] [{if | unless} <cond>]
   way, it becomes very easy to insert cookies and match on IP addresses in
   order to maintain stickiness between HTTP and HTTPS.
 
+  Note : Consider not using this feature in multi-process mode (nbproc > 1)
+         unless you know what you do : memory is not shared between the
+         processes, which can result in random behaviours.
+
   Example :
     # forward SMTP users to the same server they just used for POP in the
     # last 30 minutes
@@ -5192,8 +5189,8 @@ stick match <pattern> [table <table>] [{if | unless} <cond>]
         server s1 192.168.1.1:25
         server s2 192.168.1.1:25
 
-  See also : "stick-table", "stick on", and section 7 about ACLs and pattern
-             extraction.
+  See also : "stick-table", "stick on", "nbproc", "bind-process" and section 7
+             about ACLs and pattern extraction.
 
 
 stick on <pattern> [table <table>] [{if | unless} <condition>]
@@ -5205,6 +5202,10 @@ stick on <pattern> [table <table>] [{if | unless} <condition>]
          "stick store-request", all with the same arguments. Please refer
          to both keywords for details. It is only provided as a convenience
          for writing more maintainable configurations.
+
+  Note : Consider not using this feature in multi-process mode (nbproc > 1)
+         unless you know what you do : memory is not shared between the
+         processes, which can result in random behaviours.
 
   Examples :
     # The following form ...
@@ -5233,7 +5234,7 @@ stick on <pattern> [table <table>] [{if | unless} <condition>]
         server s1 192.168.1.1:443
         server s2 192.168.1.1:443
 
-  See also : "stick match" and "stick store-request"
+  See also : "stick match", "stick store-request", "nbproc" and "bind-process".
 
 
 stick store-request <pattern> [table <table>] [{if | unless} <condition>]
@@ -5294,6 +5295,10 @@ stick store-request <pattern> [table <table>] [{if | unless} <condition>]
   established, so that the table will contain the real server that processed
   the request.
 
+  Note : Consider not using this feature in multi-process mode (nbproc > 1)
+         unless you know what you do : memory is not shared between the
+         processes, which can result in random behaviours.
+
   Example :
     # forward SMTP users to the same server they just used for POP in the
     # last 30 minutes
@@ -5312,8 +5317,8 @@ stick store-request <pattern> [table <table>] [{if | unless} <condition>]
         server s1 192.168.1.1:25
         server s2 192.168.1.1:25
 
-  See also : "stick-table", "stick on", and section 7 about ACLs and pattern
-             extraction.
+  See also : "stick-table", "stick on", "nbproc", "bind-process" and section 7
+             about ACLs and pattern extraction.
 
 
 stick-table type {ip | integer | string [len <length>] } size <size>
@@ -6390,6 +6395,10 @@ be_conn(backend) <integer>
   backend. It can be used to use a specific farm when the nominal one is full.
   See also the "fe_conn", "queue" and "be_sess_rate" criteria.
 
+be_id <integer>
+  Applies to the backend's id. Can be used in frontends to check from which
+  backend it was called.
+
 be_sess_rate <integer>
 be_sess_rate(backend) <integer>
   Returns true when the sessions creation rate on the backend matches the
@@ -6508,6 +6517,9 @@ src <ip_address>
 
 src_port <integer>
   Applies to the client's TCP source port. This has a very limited usage.
+
+srv_id <integer>
+  Applies to the server's id. Can be used in frontends or backends.
 
 srv_is_up(<server>)
 srv_is_up(<backend>/<server>)
@@ -7920,11 +7932,20 @@ easier finding and understanding.
           so that it does not happen anymore. This status is very rare and
           might happen when the global "ulimit-n" parameter is forced by hand.
 
+     PD   The proxy blocked an incorrectly formatted chunked encoded message in
+          a request or a response, after the server has emitted its headers. In
+          most cases, this will indicate an invalid message from the server to
+          the client.
+
      PH   The proxy blocked the server's response, because it was invalid,
           incomplete, dangerous (cache control), or matched a security filter.
           In any case, an HTTP 502 error is sent to the client. One possible
           cause for this error is an invalid syntax in an HTTP header name
-          containing unauthorized characters.
+          containing unauthorized characters. It is also possible but quite
+          rare, that the proxy blocked a chunked-encoding request from the
+          client due to an invalid syntax, before the server responded. In this
+          case, an HTTP 400 error is sent to the client and reported in the
+          logs.
 
      PR   The proxy blocked the client's HTTP request, either because of an
           invalid HTTP syntax, in which case it returned an HTTP 400 error to
