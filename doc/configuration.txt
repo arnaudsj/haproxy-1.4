@@ -2232,16 +2232,16 @@ http-check expect [!] <match> <pattern>
 
   Examples :
          # only accept status 200 as valid
-         http-request expect status 200
+         http-check expect status 200
 
          # consider SQL errors as errors
-         http-request expect ! string SQL\ Error
+         http-check expect ! string SQL\ Error
 
          # consider status 5xx only as errors
-         http-request expect ! rstatus ^5
+         http-check expect ! rstatus ^5
 
          # check that we have a correct hexadecimal tag before /html
-         http-request expect rstring <!--tag:[0-9a-f]*</html>
+         http-check expect rstring <!--tag:[0-9a-f]*</html>
 
   See also : "option httpchk", "http-check disable-on-404"
 
@@ -4694,13 +4694,10 @@ stats admin { if | unless } <cond>
          unless you know what you do : memory is not shared between the
          processes, which can result in random behaviours.
 
-  Currently, there are 2 known limitations :
-
-    - The POST data are limited to one packet, which means that if the list of
-      servers is too long, the request won't be processed. It is recommended
-      to alter few servers at a time.
-
-    - Expect: 100-continue is not supported.
+  Currently, the POST request is limited to the buffer size minus the reserved
+  buffer space, which means that if the list of servers is too long, the
+  request won't be processed. It is recommended to alter few servers at a
+  time.
 
   Example :
     # statistics admin level only for localhost
