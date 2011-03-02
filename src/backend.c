@@ -244,7 +244,7 @@ struct server *get_server_ph_post(struct session *s)
 	struct http_msg *msg  = &txn->req;
 	struct proxy    *px   = s->be;
 	unsigned int     plen = px->url_param_len;
-	unsigned long    len  = msg->hdr_content_len;
+	unsigned long    len  = msg->body_len;
 	const char      *params = req->data + msg->sov;
 	const char      *p    = params;
 
@@ -545,14 +545,13 @@ int assign_server(struct session *s)
 				/* URL Parameter hashing */
 				if (s->txn.req.msg_state < HTTP_MSG_BODY)
 					break;
-				if (s->txn.meth == HTTP_METH_POST &&
-				    memchr(s->txn.req.sol + s->txn.req.sl.rq.u, '&',
-					   s->txn.req.sl.rq.u_l ) == NULL)
+
+				s->srv = get_server_ph(s->be,
+						       s->txn.req.sol + s->txn.req.sl.rq.u,
+						       s->txn.req.sl.rq.u_l);
+
+				if (!s->srv && s->txn.meth == HTTP_METH_POST)
 					s->srv = get_server_ph_post(s);
-				else
-					s->srv = get_server_ph(s->be,
-							       s->txn.req.sol + s->txn.req.sl.rq.u,
-							       s->txn.req.sl.rq.u_l);
 				break;
 
 			case BE_LB_HASH_HDR:
@@ -1313,6 +1312,9 @@ acl_fetch_be_id(struct proxy *px, struct session *l4, void *l7, int dir,
 static int
 acl_fetch_srv_id(struct proxy *px, struct session *l4, void *l7, int dir,
                 struct acl_expr *expr, struct acl_test *test) {
+
+	if (!l4->srv)
+		return 0;
 
 	test->flags = ACL_TEST_F_READ_ONLY;
 
